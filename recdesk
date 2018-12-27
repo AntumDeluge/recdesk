@@ -1,0 +1,145 @@
+#!/bin/bash
+
+# This script is specific to my local machine. Many of the options may need
+# to be changed to work on different systems.
+#
+# Licensing: CC0
+
+# check if necessary executables are available
+FFMPEG=$(which ffmpeg)
+XWIN=$(which xwininfo)
+
+if [ -z "${FFMPEG}" ]; then
+	echo -e "\nERROR: FFmpeg executable not found"
+	exit 1
+else
+	echo "FFmpeg executable: ${FFMPEG}"
+fi
+
+if [ -z "${XWIN}" ]; then
+	echo -e "\nERROR: xwininfo executable not found"
+	exit 1
+else
+	echo "xwininfo executable: ${XWIN}"
+fi
+
+# command line options
+
+# framerate
+FPS=30
+
+# use "-nomouse" option to hide cursor
+MOUSE=1
+
+for OPT in $@; do
+	if [ "${OPT}" == "-nomouse" ]; then
+		MOUSE=0
+	elif [ "${OPT}" == "-mic" ]; then
+		MIC=1
+	fi
+done
+
+
+# find fullscreen resolution
+RES=$(xwininfo -root | grep "\-geometry" | cut -d " " -f 4- | cut -d "+" -f -1)
+echo "Resolution: ${RES}"
+
+# output
+MS=$(date +"%N" | cut -c -3)
+TIMESTAMP=$(date +"%F_%H.%M.%S.")${MS}
+OUTDIR="${HOME}/Videos/ScreenRecords"
+OUTNAME="capture_${TIMESTAMP}"
+OUTVID="${OUTDIR}/${OUTNAME}-video.mkv"
+OUTAUD="${OUTDIR}/${OUTNAME}-audio.mka"
+LOGAUD="${OUTDIR}/${OUTNAME}-audio.log"
+LOGMUX="${OUTDIR}/${OUTNAME}-mux.log"
+OUTFILE="${OUTDIR}/${OUTNAME}.mkv"
+
+echo -e "\nOutputting to ${OUTFILE}"
+
+# make sure target directory is not a file
+if [ -f "${OUTDIR}" ]; then
+	echo -e "\nERROR: Cannot create target directory ${OUTDIR}, file exists"
+	exit 1
+fi
+
+# create target directory if it does not exist
+if [ ! -d "${OUTDIR}" ]; then
+	echo
+	mkdir -vp "${OUTDIR}"
+fi
+
+# set FFmpeg constant values
+FFMPEG="${FFMPEG} -hide_banner -rtbufsize 150M"
+
+# empty line before FFmpeg output
+echo
+
+
+AUDSYS=alsa_output.pci-0000_00_1b.0.analog-stereo.monitor
+AUDMIC=alsa_input.pci-0000_00_1b.0.analog-stereo
+AUDWC=alsa_input.usb-046d_09a1_62318550-02.analog-mono
+
+# capture audio
+if [ ! -z "${MIC}" ]; then
+	echo "Capturing system and mic audio"
+	# FIXME: amerge option doesn't merge audio streams
+	# TODO: add option to keep multiple audio streams separate
+	${FFMPEG} -f pulse -channels 1 -i ${AUDSYS} -f pulse -channels 1 -i ${AUDWC} -map 0:a -map 1:a -vn -c:a pcm_s16le -ar 44100 "${OUTAUD}" > "${LOGAUD}" 2>&1 & APID=$!
+	#${FFMPEG} -f pulse -channels 1 -i ${AUDSYS} -f pulse -channels 1 -i ${AUDWC} -filter_complex amerge -vn -c:a pcm_s16le -ar 44100 "${OUTAUD}" > "${LOGAUD}" 2>&1 & APID=$!
+else
+	echo "Capturing system audio"
+	${FFMPEG} -f pulse -channels 1 -i ${AUDSYS} -vn -c:a pcm_s16le -ar 44100 "${OUTAUD}" > "${LOGAUD}" 2>&1 & APID=$!
+fi
+
+# capture video
+${FFMPEG} -f x11grab -draw_mouse ${MOUSE} -framerate ${FPS} -s ${RES} -i :0.0 -an -c:v libx264 -preset ultrafast -qp 0 -x264opts keyint=1 "${OUTVID}"
+VEXIT=$?
+
+# end audio capture
+kill -s SIGINT ${APID}
+AEXIT=$?
+
+if [ "${VEXIT}" -ne "0" ]; then
+	echo -e "\nERROR: Video capture exited with code: ${VEXIT}"
+	exit ${VEXIT}
+else
+	echo -e "\nVideo capture terminted successfully"
+fi
+
+if [ "${AEXIT}" -ne "0" ]; then
+	echo -e "\nERROR: Audio capture exited with code: ${AEXIT}"
+	echo -e "Check ${LOGAUD} for FFmpeg audio capture log"
+	exit ${AEXIT}
+else
+	echo -e "\nAudio capture terminated successfully"
+fi
+
+
+# mux video & audio
+echo -e "\nMuxing video with audio ..."
+
+MAPPING="-map 0:0 -map 1:0"
+if [ ! -z "${MIC}" ]; then
+	MAPPING="${MAPPING} -map 1:1"
+fi
+${FFMPEG} -i "${OUTVID}" -i "${OUTAUD}" ${MAPPING} -c copy "${OUTFILE}" > "${LOGMUX}" 2>&1 & APID=$!
+
+# wait for muxing to finish
+wait ${APID}
+
+MEXIT=$?
+
+if [ "${MEXIT}" -ne "0" ]; then
+	echo -e "\nAn error occurred muxing video with audio"
+	exit ${MEXIT}
+else
+	echo -e "\nVideo/Audio muxing finished successfully"
+	rm -v "${LOGMUX}"
+fi
+
+# remove vid & aud independent streams
+rm -v "${OUTVID}" "${OUTAUD}"
+
+echo -e "\nCheck ${LOGAUD} for FFmpeg audio capture log"
+
